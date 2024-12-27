@@ -4,7 +4,6 @@
 #include "sshpty.h"
 
 /* Android 14兼容性处理，可能需要移除或替换一些系统调用 */
-
 #if defined(HAVE_OPENPTY)
 #undef HAVE_DEV_PTMX
 #endif
@@ -12,6 +11,7 @@
 #ifdef HAVE_PTY_H
 # include <pty.h>
 #endif
+
 #if defined(USE_DEV_PTMX) && defined(HAVE_STROPTS_H)
 # include <stropts.h>
 #endif
@@ -33,7 +33,7 @@ int pty_allocate(int *ptyfd, int *ttyfd, char *namebuf, int namebuflen)
 
         i = openpty(ptyfd, ttyfd, NULL, NULL, NULL);
         if (i < 0) {
-            dropbear_log(LOG_WARNING, "pty_allocate: openpty: %.100s", strerror(errno));
+            dropbear_log(LOG_WARNING, "pty_allocate: openpty failed: %.100s", strerror(errno));
             return 0;
         }
         name = ttyname(*ttyfd);
@@ -41,7 +41,9 @@ int pty_allocate(int *ptyfd, int *ttyfd, char *namebuf, int namebuflen)
             dropbear_exit("ttyname fails for openpty device");
         }
 
-        strlcpy(namebuf, name, namebuflen); /* 可能会截断 */
+        if (strlcpy(namebuf, name, namebuflen) >= namebuflen) {
+            dropbear_log(LOG_WARNING, "Buffer overflow risk with namebuf in pty_allocate.");
+        }
         return 1;
     #else /* 如果没有 openpty */
         #if defined(USE_DEV_PTMX)
@@ -56,46 +58,55 @@ int pty_allocate(int *ptyfd, int *ttyfd, char *namebuf, int namebuflen)
             }
 
             if (grantpt(ptm) < 0) {
-                dropbear_log(LOG_WARNING, "grantpt: %.100s", strerror(errno));
+                dropbear_log(LOG_WARNING, "grantpt failed: %.100s", strerror(errno));
                 return 0;
             }
 
             if (unlockpt(ptm) < 0) {
-                dropbear_log(LOG_WARNING, "unlockpt: %.100s", strerror(errno));
+                dropbear_log(LOG_WARNING, "unlockpt failed: %.100s", strerror(errno));
                 return 0;
             }
 
             pts = ptsname(ptm);
-            if (pts == NULL) {
+            if (!pts) {
                 dropbear_log(LOG_WARNING, "Slave pty side name could not be obtained.");
+                close(ptm);
+                return 0;
             }
 
-            strlcpy(namebuf, pts, namebuflen);
+            if (strlcpy(namebuf, pts, namebuflen) >= namebuflen) {
+                dropbear_log(LOG_WARNING, "Buffer overflow risk with namebuf in pty_allocate.");
+            }
+
             *ptyfd = ptm;
 
             /* 打开从设备 */
             *ttyfd = open(namebuf, O_RDWR | O_NOCTTY);
             if (*ttyfd < 0) {
-                dropbear_log(LOG_ERR, "error opening pts %.100s: %.100s", namebuf, strerror(errno));
+                dropbear_log(LOG_ERR, "Error opening pts %.100s: %.100s", namebuf, strerror(errno));
                 close(*ptyfd);
                 return 0;
             }
 
             return 1;
         #else /* 使用其他方法分配 pty */
-            /* Android 设备上可以使用 /dev/ptmx 或通过其他机制来分配 */
             const char *name;
 
-            *ptyfd = open("/dev/ptmx", O_RDWR | O_NOCTTY);  // 替换 /dev/ptc 为 /dev/ptmx
+            *ptyfd = open("/dev/ptmx", O_RDWR | O_NOCTTY);
             if (*ptyfd < 0) {
                 dropbear_log(LOG_ERR, "Could not open /dev/ptmx: %.100s", strerror(errno));
                 return 0;
             }
+
             name = ttyname(*ptyfd);
             if (!name) {
                 dropbear_exit("ttyname fails for /dev/ptmx device");
             }
-            strlcpy(namebuf, name, namebuflen);
+
+            if (strlcpy(namebuf, name, namebuflen) >= namebuflen) {
+                dropbear_log(LOG_WARNING, "Buffer overflow risk with namebuf in pty_allocate.");
+            }
+
             *ttyfd = open(name, O_RDWR | O_NOCTTY);
             if (*ttyfd < 0) {
                 dropbear_log(LOG_ERR, "Could not open pty slave side %.100s: %.100s", name, strerror(errno));
@@ -108,24 +119,18 @@ int pty_allocate(int *ptyfd, int *ttyfd, char *namebuf, int namebuflen)
 }
 
 /* 释放TTY，恢复其归属 */
-void
-pty_release(const char *tty_name)
+void pty_release(const char *tty_name)
 {
-    if (chown(tty_name, (uid_t) 0, (gid_t) 0) < 0
-            && (errno != ENOENT)) {
-        dropbear_log(LOG_ERR,
-                "chown %.100s 0 0 failed: %.100s", tty_name, strerror(errno));
+    if (chown(tty_name, (uid_t) 0, (gid_t) 0) < 0 && (errno != ENOENT)) {
+        dropbear_log(LOG_ERR, "chown %.100s 0 0 failed: %.100s", tty_name, strerror(errno));
     }
-    if (chmod(tty_name, (mode_t) 0666) < 0
-            && (errno != ENOENT)) {
-        dropbear_log(LOG_ERR,
-            "chmod %.100s 0666 failed: %.100s", tty_name, strerror(errno));
+    if (chmod(tty_name, (mode_t) 0666) < 0 && (errno != ENOENT)) {
+        dropbear_log(LOG_ERR, "chmod %.100s 0666 failed: %.100s", tty_name, strerror(errno));
     }
 }
 
 /* 设置TTY为当前进程的控制TTY */
-void
-pty_make_controlling_tty(int *ttyfd, const char *tty_name)
+void pty_make_controlling_tty(int *ttyfd, const char *tty_name)
 {
     int fd;
 
@@ -134,31 +139,26 @@ pty_make_controlling_tty(int *ttyfd, const char *tty_name)
 
     /* 首先断开当前控制TTY */
     if (setsid() < 0) {
-        dropbear_log(LOG_ERR,
-            "setsid: %.100s", strerror(errno));
+        dropbear_log(LOG_ERR, "setsid: %.100s", strerror(errno));
     }
 
     /* 设置控制TTY */
 #ifdef TIOCSCTTY
     if (ioctl(*ttyfd, TIOCSCTTY, NULL) < 0) {
-        dropbear_log(LOG_ERR,
-            "ioctl(TIOCSCTTY): %.100s", strerror(errno));
+        dropbear_log(LOG_ERR, "ioctl(TIOCSCTTY): %.100s", strerror(errno));
     }
 #endif
 
     fd = open(tty_name, O_RDWR);
     if (fd < 0) {
-        dropbear_log(LOG_ERR,
-            "%.100s: %.100s", tty_name, strerror(errno));
+        dropbear_log(LOG_ERR, "%.100s: %.100s", tty_name, strerror(errno));
     } else {
         close(fd);
     }
 }
 
 /* 修改窗口大小 */
-void
-pty_change_window_size(int ptyfd, int row, int col,
-    int xpixel, int ypixel)
+void pty_change_window_size(int ptyfd, int row, int col, int xpixel, int ypixel)
 {
     struct winsize w;
 
@@ -169,8 +169,7 @@ pty_change_window_size(int ptyfd, int row, int col,
     (void) ioctl(ptyfd, TIOCSWINSZ, &w);
 }
 
-void
-pty_setowner(struct passwd *pw, const char *tty_name)
+void pty_setowner(struct passwd *pw, const char *tty_name)
 {
     struct group *grp;
     gid_t gid;
@@ -189,22 +188,18 @@ pty_setowner(struct passwd *pw, const char *tty_name)
 
     /* 修改所有者和权限 */
     if (stat(tty_name, &st)) {
-        dropbear_exit("pty_setowner: stat(%.101s) failed: %.100s",
-                tty_name, strerror(errno));
+        dropbear_exit("pty_setowner: stat(%.101s) failed: %.100s", tty_name, strerror(errno));
     }
 
     if (st.st_uid != pw->pw_uid || !(st.st_gid == gid || st.st_gid == pw->pw_gid)) {
         if (chown(tty_name, pw->pw_uid, gid) < 0) {
-            dropbear_exit("chown(%.100s, %u, %u) failed: %.100s",
-                tty_name, (unsigned int)pw->pw_uid, (unsigned int)gid,
-                strerror(errno));
+            dropbear_exit("chown(%.100s, %u, %u) failed: %.100s", tty_name, (unsigned int) pw->pw_uid, (unsigned int) gid, strerror(errno));
         }
     }
 
-    if ((st.st_mode & (S_IRWXU|S_IRWXG|S_IRWXO)) != mode) {
+    if ((st.st_mode & (S_IRWXU | S_IRWXG | S_IRWXO)) != mode) {
         if (chmod(tty_name, mode) < 0) {
-            dropbear_exit("chmod(%.100s, 0%o) failed: %.100s",
-                tty_name, mode, strerror(errno));
+            dropbear_exit("chmod(%.100s, 0%o) failed: %.100s", tty_name, mode, strerror(errno));
         }
     }
 }
