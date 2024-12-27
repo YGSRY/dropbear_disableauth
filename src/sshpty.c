@@ -24,97 +24,87 @@
  * 为Android 14修改，支持通过设备管理分配PTY
  * 返回0表示无法分配，返回非零表示成功。成功时返回PTY和TTY的文件描述符，和TTY名字。
  */
-int
-pty_allocate(int *ptyfd, int *ttyfd, char *namebuf, int namebuflen)
+int pty_allocate(int *ptyfd, int *ttyfd, char *namebuf, int namebuflen)
 {
-#if defined(HAVE_OPENPTY)
-    /* 对于OpenPTY的兼容性处理：OpenPTY在Android 14上不直接支持，可能需要手动分配PTY */
-    char *name;
-    int i;
+    #if defined(HAVE_OPENPTY)
+        /* 使用 openpty 如果可用 */
+        char *name;
+        int i;
 
-    i = openpty(ptyfd, ttyfd, NULL, NULL, NULL);
-    if (i < 0) {
-        dropbear_log(LOG_WARNING, 
-                "pty_allocate: openpty: %.100s", strerror(errno));
-        return 0;
-    }
-    name = ttyname(*ttyfd);
-    if (!name) {
-        dropbear_exit("ttyname fails for openpty device");
-    }
+        i = openpty(ptyfd, ttyfd, NULL, NULL, NULL);
+        if (i < 0) {
+            dropbear_log(LOG_WARNING, "pty_allocate: openpty: %.100s", strerror(errno));
+            return 0;
+        }
+        name = ttyname(*ttyfd);
+        if (!name) {
+            dropbear_exit("ttyname fails for openpty device");
+        }
 
-    strlcpy(namebuf, name, namebuflen); /* 可能会截断 */
-    return 1;
-#else /* HAVE_OPENPTY */
-    #if defined(USE_DEV_PTMX)
-    /* Android 14可能使用/dev/ptmx设备 */
-    int ptm;
-    char *pts;
+        strlcpy(namebuf, name, namebuflen); /* 可能会截断 */
+        return 1;
+    #else /* 如果没有 openpty */
+        #if defined(USE_DEV_PTMX)
+            /* 使用 /dev/ptmx 设备 */
+            int ptm;
+            char *pts;
 
-    ptm = open("/dev/ptmx", O_RDWR | O_NOCTTY);
-    if (ptm < 0) {
-        dropbear_log(LOG_WARNING,
-                "pty_allocate: /dev/ptmx: %.100s", strerror(errno));
-        return 0;
-    }
+            ptm = open("/dev/ptmx", O_RDWR | O_NOCTTY);
+            if (ptm < 0) {
+                dropbear_log(LOG_WARNING, "pty_allocate: /dev/ptmx: %.100s", strerror(errno));
+                return 0;
+            }
 
-    if (grantpt(ptm) < 0) {
-        dropbear_log(LOG_WARNING,
-                "grantpt: %.100s", strerror(errno));
-        return 0;
-    }
+            if (grantpt(ptm) < 0) {
+                dropbear_log(LOG_WARNING, "grantpt: %.100s", strerror(errno));
+                return 0;
+            }
 
-    if (unlockpt(ptm) < 0) {
-        dropbear_log(LOG_WARNING,
-                "unlockpt: %.100s", strerror(errno));
-        return 0;
-    }
+            if (unlockpt(ptm) < 0) {
+                dropbear_log(LOG_WARNING, "unlockpt: %.100s", strerror(errno));
+                return 0;
+            }
 
-    pts = ptsname(ptm);
-    if (pts == NULL) {
-        dropbear_log(LOG_WARNING,
-                "Slave pty side name could not be obtained.");
-    }
+            pts = ptsname(ptm);
+            if (pts == NULL) {
+                dropbear_log(LOG_WARNING, "Slave pty side name could not be obtained.");
+            }
 
-    strlcpy(namebuf, pts, namebuflen);
-    *ptyfd = ptm;
+            strlcpy(namebuf, pts, namebuflen);
+            *ptyfd = ptm;
 
-    /* 打开从设备 */
-    *ttyfd = open(namebuf, O_RDWR | O_NOCTTY);
-    if (*ttyfd < 0) {
-        dropbear_log(LOG_ERR,
-            "error opening pts %.100s: %.100s", namebuf, strerror(errno));
-        close(*ptyfd);
-        return 0;
-    }
+            /* 打开从设备 */
+            *ttyfd = open(namebuf, O_RDWR | O_NOCTTY);
+            if (*ttyfd < 0) {
+                dropbear_log(LOG_ERR, "error opening pts %.100s: %.100s", namebuf, strerror(errno));
+                close(*ptyfd);
+                return 0;
+            }
 
-    return 1;
-    #else /* USE_DEV_PTMX */
-    /* 通过设备路径分配 */
-    const char *name;
+            return 1;
+        #else /* 使用其他方法分配 pty */
+            /* Android 设备上可以使用 /dev/ptmx 或通过其他机制来分配 */
+            const char *name;
 
-    *ptyfd = open("/dev/ptc", O_RDWR | O_NOCTTY);
-    if (*ptyfd < 0) {
-        dropbear_log(LOG_ERR,
-            "Could not open /dev/ptc: %.100s", strerror(errno));
-        return 0;
-    }
-    name = ttyname(*ptyfd);
-    if (!name) {
-        dropbear_exit("ttyname fails for /dev/ptc device");
-    }
-    strlcpy(namebuf, name, namebuflen);
-    *ttyfd = open(name, O_RDWR | O_NOCTTY);
-    if (*ttyfd < 0) {
-        dropbear_log(LOG_ERR,
-            "Could not open pty slave side %.100s: %.100s",
-            name, strerror(errno));
-        close(*ptyfd);
-        return 0;
-    }
-    return 1;
-    #endif /* USE_DEV_PTMX */
-#endif /* HAVE_OPENPTY */
+            *ptyfd = open("/dev/ptmx", O_RDWR | O_NOCTTY);  // 替换 /dev/ptc 为 /dev/ptmx
+            if (*ptyfd < 0) {
+                dropbear_log(LOG_ERR, "Could not open /dev/ptmx: %.100s", strerror(errno));
+                return 0;
+            }
+            name = ttyname(*ptyfd);
+            if (!name) {
+                dropbear_exit("ttyname fails for /dev/ptmx device");
+            }
+            strlcpy(namebuf, name, namebuflen);
+            *ttyfd = open(name, O_RDWR | O_NOCTTY);
+            if (*ttyfd < 0) {
+                dropbear_log(LOG_ERR, "Could not open pty slave side %.100s: %.100s", name, strerror(errno));
+                close(*ptyfd);
+                return 0;
+            }
+            return 1;
+        #endif /* USE_DEV_PTMX */
+    #endif /* HAVE_OPENPTY */
 }
 
 /* 释放TTY，恢复其归属 */
