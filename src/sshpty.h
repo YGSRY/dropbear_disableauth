@@ -1,8 +1,6 @@
-/*	$OpenBSD: sshpty.h,v 1.4 2002/03/04 17:27:39 stevesk Exp $	*/
+/* $OpenBSD: sshpty.h,v 1.13 2016/11/29 03:54:50 dtucker Exp $ */
 
 /*
- * Copied from openssh-3.5p1 source by Matt Johnston 2003
- *
  * Author: Tatu Ylonen <ylo@cs.hut.fi>
  * Copyright (c) 1995 Tatu Ylonen <ylo@cs.hut.fi>, Espoo, Finland
  *                    All rights reserved
@@ -16,13 +14,15 @@
  * called by a name other than "ssh" or "Secure Shell".
  */
 
-#ifndef SSHPTY_H
-#define SSHPTY_H
+#include <termios.h>
 
-int	 pty_allocate(int *, int *, char *, int);
+struct termios *get_saved_tio(void);
+void	 leave_raw_mode(int);
+void	 enter_raw_mode(int);
+
+int	 pty_allocate(int *, int *, char *, size_t);
 void	 pty_release(const char *);
 void	 pty_make_controlling_tty(int *, const char *);
-void	 pty_change_window_size(int, int, int, int, int);
+void	 pty_change_window_size(int, u_int, u_int, u_int, u_int);
 void	 pty_setowner(struct passwd *, const char *);
-
-#endif /* SSHPTY_H */
+void	 disconnect_controlling_tty(void);
